@@ -281,8 +281,7 @@ class Throttle:
         quota_left = quota - used
 
         return float(quota_left) / float(time_left)
-        
-        
+                
     def sendable(self):
         """How many bytes can we send without exceeding bandwidth?"""
         self.trim_log()
