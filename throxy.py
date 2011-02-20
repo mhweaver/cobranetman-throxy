@@ -212,15 +212,13 @@ class Throttle:
     """Bandwidth limit tracker."""
 
     def __init__(self, kbps, quota_used=[0,0], interval=1.0):
-        self.bytes_per_second = int(kbps * KILO) / 8
         self.interval = interval
-        self.fragment_size = min(512, self.bytes_per_second / 4)
         self.transmit_log = []
         self.weighted_throughput = 0.0
         self.real_throughput = 0
         self.last_updated = time.time()
         self.quota_used = quota_used
-
+        self.fragment_size = lambda: min(512, self.max_throughput() / 4)
     def update_throughput(self, now):
         """Update weighted and real throughput."""
         self.weighted_throughput = 0.0
@@ -268,13 +266,13 @@ class Throttle:
         
         # Convert both quota and total_used from megabytes to bytes
         quota = options.quota * 1024 * 1024
-        if total_used == None: total_used = self.quota_used[1]
+        if total_used == None: used = self.quota_used[1]
         else: used = total_used * 1024 * 1024
         
         time_left = self.get_quota_reset_time() - time.time()
         quota_left = quota - used
 
-        return float(quota_left) / float(time_left)
+        return int(float(quota_left) / float(time_left))
         
     def get_quota_reset_time(self):
         curr_time = time.localtime()
@@ -299,7 +297,7 @@ class Throttle:
         """How many bytes can we send without exceeding bandwidth?"""
         self.trim_log()
         weighted_bytes = int(self.weighted_throughput / self.interval)
-        return max(0, self.bytes_per_second - weighted_bytes)
+        return max(0, self.max_throughput() - weighted_bytes)
 
     def weighted_kbps(self):
         """Compute recent bandwidth usage, in kbps."""
@@ -327,12 +325,12 @@ class ThrottleSender(asyncore.dispatcher):
     def writable(self):
         """Check if this channel is ready to write some data."""
         return (len(self.buffer) and
-                self.throttle.sendable() / 2 > self.throttle.fragment_size)
+                self.throttle.sendable() / 2 > self.throttle.fragment_size())
 
     def handle_write(self):
         """Write some data to the socket."""
         max_bytes = self.throttle.sendable() / 2
-        if max_bytes < self.throttle.fragment_size:
+        if max_bytes < self.throttle.fragment_size():
             return
         bytes = self.send(self.buffer[0][:max_bytes])
         self.throttle.log_sent_bytes(bytes)
@@ -491,9 +489,10 @@ class ProxyServer(asyncore.dispatcher):
         debug("listening on %s:%d" % self.addr)
 
     def readable(self):
-        debug('%8.1f kbps up %8.1f kbps down\r' % (
+        debug('%8.1f kbps up %8.1f kbps down %8.1f KB/s max\r' % (
             self.upload_throttle.real_kbps(),
             self.download_throttle.real_kbps(),
+            self.download_throttle.max_throughput() / 1024,
             ), newline=False)
         return True
 
@@ -557,6 +556,6 @@ if __name__ == '__main__':
     try:
         asyncore.loop(timeout=0.1)
     except:
-        proxy.shutdown(2)
-        proxy.close()
+        #proxy.shutdown(2)
+        #proxy.close()
         raise
