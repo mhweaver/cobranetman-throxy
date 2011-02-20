@@ -132,8 +132,12 @@ class Header:
         else:
             self.host_name = self.host
             self.host_port = 80
-        self.host_ip = socket.gethostbyname(self.host_name)
-        self.host_addr = (self.host_ip, self.host_port)
+        try:
+            self.host_ip = socket.gethostbyname(self.host_name)
+            self.host_addr = (self.host_ip, self.host_port)
+        except:
+            debug('DNS error when trying to look up %s.' % self.host_name)
+            raise
 
     def extract_request(self):
         """Extract path from HTTP request."""
@@ -479,7 +483,7 @@ class ProxyServer(asyncore.dispatcher):
 
     def __init__(self):
         asyncore.dispatcher.__init__(self)
-        self.quota_used = [0,0]
+        self.quota_used = [0,options.quota_used * 1024 * 1024]
         self.download_throttle = Throttle(self.quota_used)
         self.upload_throttle = Throttle(self.quota_used)
         self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -489,10 +493,10 @@ class ProxyServer(asyncore.dispatcher):
         debug("listening on %s:%d" % self.addr)
 
     def readable(self):
-        debug('%8.1f kbps up %8.1f kbps down %8.1f KB/s max\r' % (
+        debug('%8.1f kbps up %8.1f kbps down %8.3f KB/s max\r' % (
             self.upload_throttle.real_kbps(),
             self.download_throttle.real_kbps(),
-            self.download_throttle.max_throughput() / 1024,
+            self.download_throttle.max_throughput() / 1024.0,
             ), newline=False)
         return True
 
@@ -544,6 +548,9 @@ if __name__ == '__main__':
     parser.add_option('-t', dest='reset_time', action='store', type='int',
         metavar='<hour>', default=14,
         help='time quota resets (default 14)')
+    parser.add_option('-u', dest='quota_used', action='store', type='float',
+        metavar='<mb>', default=0.0,
+        help='amount of quota used so far (default 0.0)')
 		
     options, args = parser.parse_args()
     proxy = ProxyServer()
