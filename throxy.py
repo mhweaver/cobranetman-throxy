@@ -556,6 +556,6 @@ if __name__ == '__main__':
     try:
         asyncore.loop(timeout=0.1)
     except:
-        #proxy.shutdown(2)
-        #proxy.close()
+        proxy.shutdown(2)
+        proxy.close()
         raise
