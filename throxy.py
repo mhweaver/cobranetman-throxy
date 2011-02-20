@@ -211,7 +211,7 @@ class Header:
 class Throttle:
     """Bandwidth limit tracker."""
 
-    def __init__(self, kbps, quota_used=[0,0], interval=1.0):
+    def __init__(self, quota_used=[0,0], interval=1.0):
         self.interval = interval
         self.transmit_log = []
         self.weighted_throughput = 0.0
@@ -480,8 +480,8 @@ class ProxyServer(asyncore.dispatcher):
     def __init__(self):
         asyncore.dispatcher.__init__(self)
         self.quota_used = [0,0]
-        self.download_throttle = Throttle(options.download, self.quota_used)
-        self.upload_throttle = Throttle(options.upload, self.quota_used)
+        self.download_throttle = Throttle(self.quota_used)
+        self.upload_throttle = Throttle(self.quota_used)
         self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
         self.addr = (options.interface, options.port)
         self.bind(self.addr)
@@ -517,12 +517,6 @@ if __name__ == '__main__':
     parser.add_option('-p', dest='port', action='store', type='int',
         metavar='<port>', default=8080,
         help="listen on this port number (default 8080)")
-    parser.add_option('-d', dest='download', action='store', type='float',
-        metavar='<kbps>', default=28.8,
-        help="download bandwidth in kbps (default 28.8)")
-    parser.add_option('-u', dest='upload', action='store', type='float',
-        metavar='<kbps>', default=28.8,
-        help="upload bandwidth in kbps (default 28.8)")
     parser.add_option('-o', dest='allow_remote', action='store_true',
         help="allow remote clients (WARNING: open proxy)")
     parser.add_option('-q', dest='quiet', action='store_true',
