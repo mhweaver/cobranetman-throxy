@@ -211,7 +211,7 @@ class Header:
 class Throttle:
     """Bandwidth limit tracker."""
 
-    def __init__(self, kbps, interval=1.0):
+    def __init__(self, kbps, quota_used=[0,0], interval=1.0):
         self.bytes_per_second = int(kbps * KILO) / 8
         self.interval = interval
         self.fragment_size = min(512, self.bytes_per_second / 4)
@@ -219,6 +219,7 @@ class Throttle:
         self.weighted_throughput = 0.0
         self.real_throughput = 0
         self.last_updated = time.time()
+        self.quota_used = quota_used
 
     def update_throughput(self, now):
         """Update weighted and real throughput."""
@@ -250,8 +251,16 @@ class Throttle:
         """Add timestamp and byte count to transmit log."""
         self.transmit_log.append((time.time(), bytes))
         self.update_throughput(time.time())
+        
+        quota_time = self.quota_used[0]
+        quota_reset_time = self.get_quota_reset_time()
+        if quota_time == 0 or quota_time > quota_reset_time:
+            self.quota_used[0] = quota_reset_time
+            self.quota_used[1] = 0
+        
+        self.quota_used[1] += bytes
 
-    def max_throughput(self, total_used=0):
+    def max_throughput(self, total_used=None):
         '''Calculate the maximum throughput we can use without exceeding the quota. Return bytes/sec as float.
         
         total_used - total number of megabytes used.
@@ -259,8 +268,15 @@ class Throttle:
         
         # Convert both quota and total_used from megabytes to bytes
         quota = options.quota * 1024 * 1024
-        used = total_used * 1024 * 1024
+        if total_used == None: total_used = self.quota_used[1]
+        else: used = total_used * 1024 * 1024
         
+        time_left = self.get_quota_reset_time() - time.time()
+        quota_left = quota - used
+
+        return float(quota_left) / float(time_left)
+        
+    def get_quota_reset_time(self):
         curr_time = time.localtime()
         reset_hour = options.reset_time
         curr_hour = time.localtime()[3] # [3] is hours, numbered 0-23
@@ -277,11 +293,8 @@ class Throttle:
                                   reset_hour, 0, 0) + # hour, minutes, seconds
                                   curr_time[6:]) # weekday, day of year, isDST
         
-        time_left = reset_time - time.mktime(curr_time)
-        quota_left = quota - used
+        return reset_time
 
-        return float(quota_left) / float(time_left)
-                
     def sendable(self):
         """How many bytes can we send without exceeding bandwidth?"""
         self.trim_log()
@@ -468,8 +481,9 @@ class ProxyServer(asyncore.dispatcher):
 
     def __init__(self):
         asyncore.dispatcher.__init__(self)
-        self.download_throttle = Throttle(options.download)
-        self.upload_throttle = Throttle(options.upload)
+        self.quota_used = [0,0]
+        self.download_throttle = Throttle(options.download, self.quota_used)
+        self.upload_throttle = Throttle(options.upload, self.quota_used)
         self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
         self.addr = (options.interface, options.port)
         self.bind(self.addr)
