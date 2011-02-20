@@ -257,8 +257,12 @@ class Throttle:
         quota_time = self.quota_used[0]
         quota_reset_time = self.get_quota_reset_time()
         if quota_time == 0 or quota_time > quota_reset_time:
+            debug('Resetting quota. quota_reset_time: %s. quota_time: %s' % (quota_reset_time, quota_time))
+            time.sleep(5)
             self.quota_used[0] = quota_reset_time
-            self.quota_used[1] = 0
+            self.quota_used[1] = self.quota_used[1] if quota_time == 0 else 0 
+            
+            
         
         self.quota_used[1] += bytes
 
@@ -294,6 +298,7 @@ class Throttle:
                                  ((curr_time[2] + extra_day), # day - add an extra day if it's past reset_hour
                                   reset_hour, 0, 0) + # hour, minutes, seconds
                                   curr_time[6:]) # weekday, day of year, isDST
+        
         
         return reset_time
 
@@ -410,11 +415,12 @@ class ServerChannel(ThrottleSender):
     def __init__(self, client, header, upload_throttle):
         ThrottleSender.__init__(self, upload_throttle)
         self.client = client
+        self.header = Header()
         self.addr = header.host_addr
         self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
         self.connect(self.addr)
         self.send_header(header)
-        self.header = Header()
+        
 
     def send_header(self, header):
         """Send HTTP request header to the server."""
@@ -493,10 +499,12 @@ class ProxyServer(asyncore.dispatcher):
         debug("listening on %s:%d" % self.addr)
 
     def readable(self):
-        debug('%8.1f kbps up %8.1f kbps down %8.3f KB/s max\r' % (
+        debug('%8.1f kbps up %8.1f kbps down %8.3f KB/s max %8.3f/%i MB used\r' % (
             self.upload_throttle.real_kbps(),
             self.download_throttle.real_kbps(),
             self.download_throttle.max_throughput() / 1024.0,
+            self.download_throttle.quota_used[1] / 1024 / 1024,
+            options.quota
             ), newline=False)
         return True
 
@@ -557,6 +565,6 @@ if __name__ == '__main__':
     try:
         asyncore.loop(timeout=0.1)
     except:
-        proxy.shutdown(2)
-        proxy.close()
+        #proxy.shutdown(2)
+        #proxy.close()
         raise
