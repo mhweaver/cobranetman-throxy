@@ -251,6 +251,38 @@ class Throttle:
         self.transmit_log.append((time.time(), bytes))
         self.update_throughput(time.time())
 
+    def max_throughput(self, total_used=0):
+        '''Calculate the maximum throughput we can use without exceeding the quota. Return bytes/sec as float.
+        
+        total_used - total number of megabytes used.
+        '''
+        
+        # Convert both quota and total_used from megabytes to bytes
+        quota = options.quota * 1024 * 1024
+        used = total_used * 1024 * 1024
+        
+        curr_time = time.localtime()
+        reset_hour = options.reset_time
+        curr_hour = time.localtime()[3] # [3] is hours, numbered 0-23
+        
+        if curr_hour >= reset_hour:
+            extra_day = 1
+        else:
+            extra_day = 0
+        
+        # Do the time stuff as a time.time_struct, since that makes it automatically deal with cases where
+        # we end up with time/dates that go negative (-1 o'clock) or get too big (Jan 32) when we start adding/subtracting days and hours
+        reset_time = time.mktime(curr_time[:2] + # year, month
+                                 ((curr_time[2] + extra_day), # day - add an extra day if it's past reset_hour
+                                  reset_hour, 0, 0) + # hour, minutes, seconds
+                                  curr_time[6:]) # weekday, day of year, isDST
+        
+        time_left = reset_time - time.mktime(curr_time)
+        quota_left = quota - used
+
+        return float(quota_left) / float(time_left)
+        
+        
     def sendable(self):
         """How many bytes can we send without exceeding bandwidth?"""
         self.trim_log()
@@ -500,6 +532,13 @@ if __name__ == '__main__':
     parser.add_option('-g', dest='gzip_size_limit', action='store',
         metavar='<bytes>', type='int', default=8192,
         help="maximum size for gzip decompression (default 8192)")
+    parser.add_option('-Q', dest='quota', action='store', type='float',
+        metavar='<mb>', default=400.0,
+        help='maximum (up + down) quota available (default 400)')
+    parser.add_option('-t', dest='reset_time', action='store', type='int',
+        metavar='<hour>', default=14,
+        help='time quota resets (default 14)')
+		
     options, args = parser.parse_args()
     proxy = ProxyServer()
     try:
