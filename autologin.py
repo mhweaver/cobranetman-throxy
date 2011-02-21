@@ -1,5 +1,4 @@
-import sys, os
-from threading import Timer
+import sys, os, time
 from urllib import urlopen, urlencode
 from getpass import getpass
 from argparse import ArgumentParser
@@ -19,7 +18,8 @@ interval = 0
 debug_mode = False
 quota_halt = True
 denied_halt = True
-timer_count = 0
+loop_count = 0
+
 
 def main():
     # Welcome screen/information
@@ -62,12 +62,12 @@ def main():
     globals()['debug_mode'] = True if options.debug_mode else False
     
     
-    globals()['timer_count'] = 0 # Used for debug mode
+    globals()['loop_count'] = 0 # Used for debug mode
     
     print '\n\nRunning... Attempting to periodically log into microtik.\n'
     
-    # Kick off the timer. Let's get this ball rolling!
-    start_timer()
+    # Kick off the loop. Let's get this ball rolling!
+    start_loop()
 
 
 def check_login():
@@ -107,34 +107,35 @@ def login(user, passwd):
         return 'Failed'
     
 
-def start_timer():
+def start_loop():
     
-    globals()['timer_count'] = globals()['timer_count'] + 1
-    if debug_mode: print 'Attempt #' + str(globals()['timer_count']) + ' starting.'
-    
-    
-    success = login(username, password)
-    halt = False
-    if success == 'Success':
-        print 'Log in attempt successful.'
-    elif success == 'Failed':
-        print 'Log in attempted failed, but not due to bad username/password. \nTrying again in ' + str(interval) + ' seconds.'
-    elif success == 'Quota':
-        print 'Log in attempt failed - bandwidth quota exceeded.'
-        halt = halt or quota_halt
-    elif success == 'Username/Password': 
-        print 'Log in attempt failed due to bad username/password.'
-        halt = halt or denied_halt
+    while 1:
+        globals()['loop_count'] = globals()['loop_count'] + 1
+        if debug_mode: print 'Attempt #' + str(globals()['loop_count']) + ' starting.'
         
-    if debug_mode: print '#' + str(globals()['timer_count'])
-    
-    if halt: # We don't want to keep trying/failing when we get rejected for these reasons.
-        print '\n\nStopping. Press <ENTER> to exit.'
-        getpass('') # Pause script
-    
-    else:
-        t = Timer(int(interval), start_timer)
-        t.start()
+        
+        success = login(username, password)
+        halt = False
+        if success == 'Success':
+            print 'Log in attempt successful.'
+        elif success == 'Failed':
+            print 'Log in attempted failed, but not due to bad username/password. \nTrying again in ' + str(interval) + ' seconds.'
+        elif success == 'Quota':
+            print 'Log in attempt failed - bandwidth quota exceeded.'
+            halt = halt or quota_halt
+        elif success == 'Username/Password': 
+            print 'Log in attempt failed due to bad username/password.'
+            halt = halt or denied_halt
+            
+        if debug_mode: print '#' + str(globals()['loop_count'])
+        
+        if halt: # We don't want to keep trying/failing when we get rejected for these reasons.
+            print '\n\nStopping. Press <ENTER> to exit.'
+            getpass('') # Pause script
+            return
+        
+        else:
+            time.sleep(interval)
 
     
 if __name__ == '__main__':
