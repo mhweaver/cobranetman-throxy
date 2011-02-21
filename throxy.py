@@ -22,32 +22,6 @@
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""
-Throxy: throttling HTTP proxy in one Python file
-
-To use it, run this script on your local machine and adjust your
-browser settings to use 127.0.0.1:8080 as HTTP proxy.
-
-* Simulate a slow connection (like dial-up).
-* Adjustable bandwidth limit for download and upload.
-* Optionally dump HTTP headers and content for debugging.
-* Decompress gzip content encoding for debugging.
-* Multiple connections, without threads (uses asyncore).
-* Only one source file, written in pure Python.
-
-Simulate analog modem connection:
-$ python throxy.py -u28.8 -d57.6
-
-Show all HTTP headers (request & reply):
-$ python throxy.py -qrs
-
-Dump HTTP headers and content to a file, without size limits:
-$ python throxy.py -rsRS -l0 -L0 -g0 > dump.txt
-
-Tell command line tools to use the proxy:
-$ export http_proxy=127.0.0.1:8080
-"""
-
 import sys
 import asyncore
 import socket
@@ -56,6 +30,9 @@ import gzip
 import struct
 import cStringIO
 import re
+import pickle
+import os.path
+from threading import Thread
 
 __revision__ = '$Rev$'
 
@@ -262,8 +239,6 @@ class Throttle:
             self.quota_used[0] = quota_reset_time
             self.quota_used[1] = self.quota_used[1] if quota_time == 0 else 0 
             
-            
-        
         self.quota_used[1] += bytes
 
     def max_throughput(self, total_used=None):
@@ -287,10 +262,7 @@ class Throttle:
         reset_hour = options.reset_time
         curr_hour = time.localtime()[3] # [3] is hours, numbered 0-23
         
-        if curr_hour >= reset_hour:
-            extra_day = 1
-        else:
-            extra_day = 0
+        extra_day = 1 if curr_hour >= reset_hour else 0
         
         # Do the time stuff as a time.time_struct, since that makes it automatically deal with cases where
         # we end up with time/dates that go negative (-1 o'clock) or get too big (Jan 32) when we start adding/subtracting days and hours
@@ -489,24 +461,58 @@ class ProxyServer(asyncore.dispatcher):
 
     def __init__(self):
         asyncore.dispatcher.__init__(self)
-        self.quota_used = [0,options.quota_used * 1024 * 1024]
+        quota = [0, max(options.quota_used, 0.0) * 1024 * 1024]
+        if options.quota_used < 0:
+            self.quota_used = self.load_quota_info(quota)
+        else:
+            self.quota_used = quota
         self.download_throttle = Throttle(self.quota_used)
         self.upload_throttle = Throttle(self.quota_used)
         self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
         self.addr = (options.interface, options.port)
         self.bind(self.addr)
         self.listen(5)
+        
         debug("listening on %s:%d" % self.addr)
+        
+        self.quota_timer_thread = ThreadWrapper(self.quota_timer, (self.quota_used))
+        self.quota_timer_thread.start()
 
-    def readable(self):
-        debug('%8.1f kbps up %8.1f kbps down %8.3f KB/s max %8.3f/%i MB used\r' % (
-            self.upload_throttle.real_kbps(),
-            self.download_throttle.real_kbps(),
-            self.download_throttle.max_throughput() / 1024.0,
-            self.download_throttle.quota_used[1] / 1024 / 1024,
-            options.quota
-            ), newline=False)
-        return True
+        self.update_stats_thread = ThreadWrapper(self.update_stats, self.upload_throttle, self.download_throttle, self.quota_used)
+        self.update_stats_thread.start()
+        
+        
+    
+    def update_stats(self, up_throttle, down_throttle, quota_used):
+        while 1:
+            debug('%8.1f kbps up %8.1f kbps down %8.3f KB/s max %8.3f/%i MB used\r' % (
+                up_throttle.real_kbps(),
+                down_throttle.real_kbps(),
+                down_throttle.max_throughput() / 1024.0,
+                quota_used[1] / 1024 / 1024,
+                options.quota
+                ), newline=False)
+            time.sleep(0.02)
+
+    
+    def save_quota_info(self, quota_used):
+        f = open('.throxy_quota', 'w')
+        pickle.dump(quota_used, f)
+        f.close()
+        debug('Saving quota information.')
+    def load_quota_info(self, quota_used):
+        try:
+            f = open('.throxy_quota', 'r')
+            quota = pickle.load(f)
+            f.close()
+            return quota
+        except:
+            return quota_used
+    
+    def quota_timer(self, quota_used):
+        while 1:
+            self.save_quota_info(quota_used)
+            time.sleep(5.0)
 
     def handle_accept(self):
         """Accept a new connection from a client."""
@@ -518,6 +524,27 @@ class ProxyServer(asyncore.dispatcher):
             channel.close()
             debug("remote client %s:%d not allowed" % addr)
 
+class ThreadWrapper(Thread):
+    def __init__(self, fn, *args, **kwargs):
+        self.fn = fn
+        self.args = args
+        self.kwargs = kwargs
+        Thread.__init__(self)
+        
+    def run(self):
+        self.fn(*self.args, **self.kwargs)
+            
+
+
+def start_server():
+    proxy = ProxyServer()
+
+    try:
+        asyncore.loop(timeout=0.1)
+    except:
+        proxy.shutdown(2)
+        proxy.close()
+        start_server()
 
 if __name__ == '__main__':
     from optparse import OptionParser
@@ -557,14 +584,9 @@ if __name__ == '__main__':
         metavar='<hour>', default=14,
         help='time quota resets (default 14)')
     parser.add_option('-u', dest='quota_used', action='store', type='float',
-        metavar='<mb>', default=0.0,
+        metavar='<mb>', default=-1.0,
         help='amount of quota used so far (default 0.0)')
 		
     options, args = parser.parse_args()
-    proxy = ProxyServer()
-    try:
-        asyncore.loop(timeout=0.1)
-    except:
-        #proxy.shutdown(2)
-        #proxy.close()
-        raise
+    start_server()
+    
