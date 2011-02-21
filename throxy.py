@@ -475,6 +475,7 @@ class ProxyServer(asyncore.dispatcher):
         
         debug("listening on %s:%d" % self.addr)
         
+        # Fire up a couple threads to do periodic stuff
         self.quota_timer_thread = ThreadWrapper(self.quota_timer, (self.quota_used))
         self.quota_timer_thread.start()
 
@@ -512,7 +513,7 @@ class ProxyServer(asyncore.dispatcher):
     def quota_timer(self, quota_used):
         while 1:
             self.save_quota_info(quota_used)
-            time.sleep(5.0)
+            time.sleep(150.0)
 
     def handle_accept(self):
         """Accept a new connection from a client."""
@@ -525,6 +526,8 @@ class ProxyServer(asyncore.dispatcher):
             debug("remote client %s:%d not allowed" % addr)
 
 class ThreadWrapper(Thread):
+    """Wrapper for functions to run them in their own thread."""
+    
     def __init__(self, fn, *args, **kwargs):
         self.fn = fn
         self.args = args
@@ -547,46 +550,46 @@ def start_server():
         start_server()
 
 if __name__ == '__main__':
-    from optparse import OptionParser
+    from argparse import ArgumentParser
     version = '%prog ' + __revision__.strip('$').replace('Rev: ', 'r')
-    parser = OptionParser(version=version)
-    parser.add_option('-i', dest='interface', action='store', type='string',
-        metavar='<ip>', default='',
+    parser = ArgumentParser(description='Start a proxy server to throttle your internet connection.', version=version)
+    parser.add_argument('-i', dest='interface', action='store', type=str,
+        metavar='<ip>', default='localhost',
         help="listen on this interface only (default all)")
-    parser.add_option('-p', dest='port', action='store', type='int',
+    parser.add_argument('-p', dest='port', action='store', type=int,
         metavar='<port>', default=8080,
         help="listen on this port number (default 8080)")
-    parser.add_option('-o', dest='allow_remote', action='store_true',
+    parser.add_argument('-o', dest='allow_remote', action='store_true',
         help="allow remote clients (WARNING: open proxy)")
-    parser.add_option('-q', dest='quiet', action='store_true',
+    parser.add_argument('-q', dest='quiet', action='store_true',
         help="don't show connect and disconnect messages")
-    parser.add_option('-s', dest='dump_send_headers', action='store_true',
+    parser.add_argument('-s', dest='dump_send_headers', action='store_true',
         help="dump headers sent to server")
-    parser.add_option('-r', dest='dump_recv_headers', action='store_true',
+    parser.add_argument('-r', dest='dump_recv_headers', action='store_true',
         help="dump headers received from server")
-    parser.add_option('-S', dest='dump_send_content', action='store_true',
+    parser.add_argument('-S', dest='dump_send_content', action='store_true',
         help="dump content sent to server")
-    parser.add_option('-R', dest='dump_recv_content', action='store_true',
+    parser.add_argument('-R', dest='dump_recv_content', action='store_true',
         help="dump content received from server")
-    parser.add_option('-l', dest='text_dump_limit', action='store',
-        metavar='<bytes>', type='int', default=1024,
+    parser.add_argument('-l', dest='text_dump_limit', action='store',
+        metavar='<bytes>', type=int, default=1024,
         help="maximum length of dumped text content (default 1024)")
-    parser.add_option('-L', dest='data_dump_limit', action='store',
-        metavar='<bytes>', type='int', default=256,
+    parser.add_argument('-L', dest='data_dump_limit', action='store',
+        metavar='<bytes>', type=int, default=256,
         help="maximum length of dumped binary content (default 256)")
-    parser.add_option('-g', dest='gzip_size_limit', action='store',
-        metavar='<bytes>', type='int', default=8192,
+    parser.add_argument('-g', dest='gzip_size_limit', action='store',
+        metavar='<bytes>', type=int, default=8192,
         help="maximum size for gzip decompression (default 8192)")
-    parser.add_option('-Q', dest='quota', action='store', type='float',
+    parser.add_argument('-Q', dest='quota', action='store', type=float,
         metavar='<mb>', default=400.0,
         help='maximum (up + down) quota available (default 400)')
-    parser.add_option('-t', dest='reset_time', action='store', type='int',
+    parser.add_argument('-t', dest='reset_time', action='store', type=int,
         metavar='<hour>', default=14,
         help='time quota resets (default 14)')
-    parser.add_option('-u', dest='quota_used', action='store', type='float',
+    parser.add_argument('-u', dest='quota_used', action='store', type=float,
         metavar='<mb>', default=-1.0,
         help='amount of quota used so far (default 0.0)')
 		
-    options, args = parser.parse_args()
+    options = parser.parse_args()
     start_server()
     
