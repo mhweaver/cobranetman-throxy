@@ -22,32 +22,6 @@
 # CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 # SOFTWARE.
 
-"""
-Throxy: throttling HTTP proxy in one Python file
-
-To use it, run this script on your local machine and adjust your
-browser settings to use 127.0.0.1:8080 as HTTP proxy.
-
-* Simulate a slow connection (like dial-up).
-* Adjustable bandwidth limit for download and upload.
-* Optionally dump HTTP headers and content for debugging.
-* Decompress gzip content encoding for debugging.
-* Multiple connections, without threads (uses asyncore).
-* Only one source file, written in pure Python.
-
-Simulate analog modem connection:
-$ python throxy.py -u28.8 -d57.6
-
-Show all HTTP headers (request & reply):
-$ python throxy.py -qrs
-
-Dump HTTP headers and content to a file, without size limits:
-$ python throxy.py -rsRS -l0 -L0 -g0 > dump.txt
-
-Tell command line tools to use the proxy:
-$ export http_proxy=127.0.0.1:8080
-"""
-
 import sys
 import asyncore
 import socket
@@ -56,6 +30,9 @@ import gzip
 import struct
 import cStringIO
 import re
+import pickle
+import os.path
+from threading import Thread
 
 __revision__ = '$Rev$'
 
@@ -132,8 +109,12 @@ class Header:
         else:
             self.host_name = self.host
             self.host_port = 80
-        self.host_ip = socket.gethostbyname(self.host_name)
-        self.host_addr = (self.host_ip, self.host_port)
+        try:
+            self.host_ip = socket.gethostbyname(self.host_name)
+            self.host_addr = (self.host_ip, self.host_port)
+        except:
+            debug('DNS error when trying to look up %s.' % self.host_name)
+            raise
 
     def extract_request(self):
         """Extract path from HTTP request."""
@@ -211,15 +192,14 @@ class Header:
 class Throttle:
     """Bandwidth limit tracker."""
 
-    def __init__(self, kbps, interval=1.0):
-        self.bytes_per_second = int(kbps * KILO) / 8
+    def __init__(self, quota_used=[0,0], interval=1.0):
         self.interval = interval
-        self.fragment_size = min(512, self.bytes_per_second / 4)
         self.transmit_log = []
         self.weighted_throughput = 0.0
         self.real_throughput = 0
         self.last_updated = time.time()
-
+        self.quota_used = quota_used
+        self.fragment_size = lambda: min(512, self.max_throughput() / 4)
     def update_throughput(self, now):
         """Update weighted and real throughput."""
         self.weighted_throughput = 0.0
@@ -250,12 +230,55 @@ class Throttle:
         """Add timestamp and byte count to transmit log."""
         self.transmit_log.append((time.time(), bytes))
         self.update_throughput(time.time())
+        
+        quota_time = self.quota_used[0]
+        quota_reset_time = self.get_quota_reset_time()
+        if quota_time == 0 or quota_time > quota_reset_time:
+            debug('Resetting quota. quota_reset_time: %s. quota_time: %s' % (quota_reset_time, quota_time))
+            time.sleep(5)
+            self.quota_used[0] = quota_reset_time
+            self.quota_used[1] = self.quota_used[1] if quota_time == 0 else 0 
+            
+        self.quota_used[1] += bytes
+
+    def max_throughput(self, total_used=None):
+        '''Calculate the maximum throughput we can use without exceeding the quota. Return bytes/sec as float.
+        
+        total_used - total number of megabytes used.
+        '''
+        
+        # Convert both quota and total_used from megabytes to bytes
+        quota = options.quota * 1024 * 1024
+        if total_used == None: used = self.quota_used[1]
+        else: used = total_used * 1024 * 1024
+        
+        time_left = self.get_quota_reset_time() - time.time()
+        quota_left = quota - used
+
+        return int(float(quota_left) / float(time_left))
+        
+    def get_quota_reset_time(self):
+        curr_time = time.localtime()
+        reset_hour = options.reset_time
+        curr_hour = time.localtime()[3] # [3] is hours, numbered 0-23
+        
+        extra_day = 1 if curr_hour >= reset_hour else 0
+        
+        # Do the time stuff as a time.time_struct, since that makes it automatically deal with cases where
+        # we end up with time/dates that go negative (-1 o'clock) or get too big (Jan 32) when we start adding/subtracting days and hours
+        reset_time = time.mktime(curr_time[:2] + # year, month
+                                 ((curr_time[2] + extra_day), # day - add an extra day if it's past reset_hour
+                                  reset_hour, 0, 0) + # hour, minutes, seconds
+                                  curr_time[6:]) # weekday, day of year, isDST
+        
+        
+        return reset_time
 
     def sendable(self):
         """How many bytes can we send without exceeding bandwidth?"""
         self.trim_log()
         weighted_bytes = int(self.weighted_throughput / self.interval)
-        return max(0, self.bytes_per_second - weighted_bytes)
+        return max(0, self.max_throughput() - weighted_bytes)
 
     def weighted_kbps(self):
         """Compute recent bandwidth usage, in kbps."""
@@ -283,12 +306,12 @@ class ThrottleSender(asyncore.dispatcher):
     def writable(self):
         """Check if this channel is ready to write some data."""
         return (len(self.buffer) and
-                self.throttle.sendable() / 2 > self.throttle.fragment_size)
+                self.throttle.sendable() / 2 > self.throttle.fragment_size())
 
     def handle_write(self):
         """Write some data to the socket."""
         max_bytes = self.throttle.sendable() / 2
-        if max_bytes < self.throttle.fragment_size:
+        if max_bytes < self.throttle.fragment_size():
             return
         bytes = self.send(self.buffer[0][:max_bytes])
         self.throttle.log_sent_bytes(bytes)
@@ -364,11 +387,12 @@ class ServerChannel(ThrottleSender):
     def __init__(self, client, header, upload_throttle):
         ThrottleSender.__init__(self, upload_throttle)
         self.client = client
+        self.header = Header()
         self.addr = header.host_addr
         self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
         self.connect(self.addr)
         self.send_header(header)
-        self.header = Header()
+        
 
     def send_header(self, header):
         """Send HTTP request header to the server."""
@@ -437,20 +461,59 @@ class ProxyServer(asyncore.dispatcher):
 
     def __init__(self):
         asyncore.dispatcher.__init__(self)
-        self.download_throttle = Throttle(options.download)
-        self.upload_throttle = Throttle(options.upload)
+        quota = [0, max(options.quota_used, 0.0) * 1024 * 1024]
+        if options.quota_used < 0:
+            self.quota_used = self.load_quota_info(quota)
+        else:
+            self.quota_used = quota
+        self.download_throttle = Throttle(self.quota_used)
+        self.upload_throttle = Throttle(self.quota_used)
         self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
         self.addr = (options.interface, options.port)
         self.bind(self.addr)
         self.listen(5)
+        
         debug("listening on %s:%d" % self.addr)
+        
+        # Fire up a couple threads to do periodic stuff
+        self.quota_timer_thread = ThreadWrapper(self.quota_timer, (self.quota_used))
+        self.quota_timer_thread.start()
 
-    def readable(self):
-        debug('%8.1f kbps up %8.1f kbps down\r' % (
-            self.upload_throttle.real_kbps(),
-            self.download_throttle.real_kbps(),
-            ), newline=False)
-        return True
+        self.update_stats_thread = ThreadWrapper(self.update_stats, self.upload_throttle, self.download_throttle, self.quota_used)
+        self.update_stats_thread.start()
+        
+        
+    
+    def update_stats(self, up_throttle, down_throttle, quota_used):
+        while 1:
+            debug('%8.1f kbps up %8.1f kbps down %8.3f KB/s max %8.3f/%i MB used\r' % (
+                up_throttle.real_kbps(),
+                down_throttle.real_kbps(),
+                down_throttle.max_throughput() / 1024.0,
+                quota_used[1] / 1024 / 1024,
+                options.quota
+                ), newline=False)
+            time.sleep(0.02)
+
+    
+    def save_quota_info(self, quota_used):
+        f = open('.throxy_quota', 'w')
+        pickle.dump(quota_used, f)
+        f.close()
+        debug('Saving quota information.')
+    def load_quota_info(self, quota_used):
+        try:
+            f = open('.throxy_quota', 'r')
+            quota = pickle.load(f)
+            f.close()
+            return quota
+        except:
+            return quota_used
+    
+    def quota_timer(self, quota_used):
+        while 1:
+            self.save_quota_info(quota_used)
+            time.sleep(150.0)
 
     def handle_accept(self):
         """Accept a new connection from a client."""
@@ -462,49 +525,71 @@ class ProxyServer(asyncore.dispatcher):
             channel.close()
             debug("remote client %s:%d not allowed" % addr)
 
+class ThreadWrapper(Thread):
+    """Wrapper for functions to run them in their own thread."""
+    
+    def __init__(self, fn, *args, **kwargs):
+        self.fn = fn
+        self.args = args
+        self.kwargs = kwargs
+        Thread.__init__(self)
+        
+    def run(self):
+        self.fn(*self.args, **self.kwargs)
+            
 
-if __name__ == '__main__':
-    from optparse import OptionParser
-    version = '%prog ' + __revision__.strip('$').replace('Rev: ', 'r')
-    parser = OptionParser(version=version)
-    parser.add_option('-i', dest='interface', action='store', type='string',
-        metavar='<ip>', default='',
-        help="listen on this interface only (default all)")
-    parser.add_option('-p', dest='port', action='store', type='int',
-        metavar='<port>', default=8080,
-        help="listen on this port number (default 8080)")
-    parser.add_option('-d', dest='download', action='store', type='float',
-        metavar='<kbps>', default=28.8,
-        help="download bandwidth in kbps (default 28.8)")
-    parser.add_option('-u', dest='upload', action='store', type='float',
-        metavar='<kbps>', default=28.8,
-        help="upload bandwidth in kbps (default 28.8)")
-    parser.add_option('-o', dest='allow_remote', action='store_true',
-        help="allow remote clients (WARNING: open proxy)")
-    parser.add_option('-q', dest='quiet', action='store_true',
-        help="don't show connect and disconnect messages")
-    parser.add_option('-s', dest='dump_send_headers', action='store_true',
-        help="dump headers sent to server")
-    parser.add_option('-r', dest='dump_recv_headers', action='store_true',
-        help="dump headers received from server")
-    parser.add_option('-S', dest='dump_send_content', action='store_true',
-        help="dump content sent to server")
-    parser.add_option('-R', dest='dump_recv_content', action='store_true',
-        help="dump content received from server")
-    parser.add_option('-l', dest='text_dump_limit', action='store',
-        metavar='<bytes>', type='int', default=1024,
-        help="maximum length of dumped text content (default 1024)")
-    parser.add_option('-L', dest='data_dump_limit', action='store',
-        metavar='<bytes>', type='int', default=256,
-        help="maximum length of dumped binary content (default 256)")
-    parser.add_option('-g', dest='gzip_size_limit', action='store',
-        metavar='<bytes>', type='int', default=8192,
-        help="maximum size for gzip decompression (default 8192)")
-    options, args = parser.parse_args()
+
+def start_server():
     proxy = ProxyServer()
+
     try:
         asyncore.loop(timeout=0.1)
     except:
         proxy.shutdown(2)
         proxy.close()
-        raise
+        start_server()
+
+if __name__ == '__main__':
+    from argparse import ArgumentParser
+    version = '%prog ' + __revision__.strip('$').replace('Rev: ', 'r')
+    parser = ArgumentParser(description='Start a proxy server to throttle your internet connection.', version=version)
+    parser.add_argument('-i', dest='interface', action='store', type=str,
+        metavar='<ip>', default='localhost',
+        help="listen on this interface only (default all)")
+    parser.add_argument('-p', dest='port', action='store', type=int,
+        metavar='<port>', default=8080,
+        help="listen on this port number (default 8080)")
+    parser.add_argument('-o', dest='allow_remote', action='store_true',
+        help="allow remote clients (WARNING: open proxy)")
+    parser.add_argument('-q', dest='quiet', action='store_true',
+        help="don't show connect and disconnect messages")
+    parser.add_argument('-s', dest='dump_send_headers', action='store_true',
+        help="dump headers sent to server")
+    parser.add_argument('-r', dest='dump_recv_headers', action='store_true',
+        help="dump headers received from server")
+    parser.add_argument('-S', dest='dump_send_content', action='store_true',
+        help="dump content sent to server")
+    parser.add_argument('-R', dest='dump_recv_content', action='store_true',
+        help="dump content received from server")
+    parser.add_argument('-l', dest='text_dump_limit', action='store',
+        metavar='<bytes>', type=int, default=1024,
+        help="maximum length of dumped text content (default 1024)")
+    parser.add_argument('-L', dest='data_dump_limit', action='store',
+        metavar='<bytes>', type=int, default=256,
+        help="maximum length of dumped binary content (default 256)")
+    parser.add_argument('-g', dest='gzip_size_limit', action='store',
+        metavar='<bytes>', type=int, default=8192,
+        help="maximum size for gzip decompression (default 8192)")
+    parser.add_argument('-Q', dest='quota', action='store', type=float,
+        metavar='<mb>', default=400.0,
+        help='maximum (up + down) quota available (default 400)')
+    parser.add_argument('-t', dest='reset_time', action='store', type=int,
+        metavar='<hour>', default=14,
+        help='time quota resets (default 14)')
+    parser.add_argument('-u', dest='quota_used', action='store', type=float,
+        metavar='<mb>', default=-1.0,
+        help='amount of quota used so far (default 0.0)')
+		
+    options = parser.parse_args()
+    start_server()
+    
